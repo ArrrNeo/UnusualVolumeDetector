@@ -8,23 +8,53 @@ import numpy as np
 import sys
 from stocklist import NasdaqController
 from tqdm import tqdm
+import sqlite3
+from sqlite3 import Error
+import pandas as pd
 
 from joblib import Parallel, delayed, parallel_backend
 import multiprocessing
 
 
 class mainObj:
-
     def __init__(self):
         pass
 
+    def create_connection(self, db_file):
+        conn = None
+        try:
+            conn = sqlite3.connect(db_file)
+            return conn
+        except Error as e:
+            print(e)
+        return conn
+
     def getData(self, ticker):
+        history_exists = False
         currentDate = datetime.datetime.strptime(
             date.today().strftime("%Y-%m-%d"), "%Y-%m-%d")
-        pastDate = currentDate - dateutil.relativedelta.relativedelta(months=5)
-        sys.stdout = open(os.devnull, "w")
+        # if db found, fetch already downloaded data
+        try:
+            sql_qry = "SELECT * FROM stock_history WHERE symbol = '" + ticker + "' ORDER BY Date ASC"
+            df = pd.read_sql_query(sql_qry, self.conn, index_col='Date')
+            # if entry exists in DB:
+            last_saved_date_time = datetime.datetime.strptime(df.index[-1], '%Y-%m-%d %H:%M:%S')
+            df.index = pd.to_datetime(df.index)
+            # pastDate = latest entry date + 1
+            pastDate = last_saved_date_time + dateutil.relativedelta.relativedelta(days=1)
+            history_exists = True
+        except Exception as e:
+            print (e)
+            pastDate = currentDate - dateutil.relativedelta.relativedelta(days=4)
         data = yf.download(ticker, pastDate, currentDate)
-        sys.stdout = sys.__stdout__
+        # add symbol to dataframe and database table
+        data['symbol'] = ticker
+        data.index = data.index.normalize()
+        # save fetched data to database table
+        data.to_sql('stock_history', self.conn, index=True, index_label='Date', if_exists='append')
+        if history_exists:
+            data = pd.concat([df, data], ignore_index=False)
+        # store what was fetched to DB
         return data[["Volume"]]
 
     def find_anomalies(self, data, cutoff):
@@ -82,6 +112,10 @@ class mainObj:
                     positive_scans.append(stonk)
 
     def main_func(self, cutoff):
+        self.conn = self.create_connection(r'stock_history.db')
+        if not self.conn:
+            print ('could not create db file')
+            exit (0)
         StocksController = NasdaqController(True)
         list_of_tickers = StocksController.getList()
         currentDate = datetime.datetime.strptime(
